@@ -1,0 +1,105 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+type UploadRequest struct {
+	Name string `json:"name"`
+	Data string `json:"data"` // base64-encoded file content
+}
+
+var clients = make(map[*websocket.Conn]bool)
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Allow all origins for local development
+	},
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		fmt.Println("WebSocket upgrade failed:", err)
+		return
+	}
+	defer ws.Close()
+
+	clients[ws] = true
+	fmt.Println("Client connected")
+
+	for {
+		_, _, err := ws.ReadMessage()
+		if err != nil {
+			fmt.Println("Client disconnected")
+			delete(clients, ws)
+			break
+		}
+	}
+}
+
+func broadcastSyncGallery() {
+	for client := range clients {
+		msg := map[string]string{"type": "SYNC_GALLERY"}
+		data, _ := json.Marshal(msg)
+		client.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+func handleUpload(w http.ResponseWriter, r *http.Request) {
+	var upload UploadRequest
+	err := json.NewDecoder(r.Body).Decode(&upload)
+	if err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	filePath := "uploads/" + upload.Name
+	data, err := decodeBase64(upload.Data)
+	if err != nil {
+		http.Error(w, "Failed to decode file", http.StatusInternalServerError)
+		return
+	}
+
+	err = ioutil.WriteFile(filePath, data, 0644)
+	if err != nil {
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Println("File uploaded:", upload.Name)
+	w.Write([]byte("OK"))
+}
+
+func decodeBase64(data string) ([]byte, error) {
+	return []byte{}, fmt.Errorf("base64 decoding not implemented")
+}
+
+func main() {
+	// Create uploads folder if not exists
+	if _, err := os.Stat("uploads"); os.IsNotExist(err) {
+		os.Mkdir("uploads", os.ModePerm)
+	}
+
+	// Handle WebSocket and Upload routes
+	http.HandleFunc("/ws", handleWebSocket)
+	http.HandleFunc("/upload", handleUpload)
+
+	// Periodically send SYNC_GALLERY to all clients every 30 sec
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			fmt.Println("Broadcasting SYNC_GALLERY")
+			broadcastSyncGallery()
+		}
+	}()
+
+	fmt.Println("Server running at http://localhost:8080")
+	http.ListenAndServe(":8080", nil)
+}
