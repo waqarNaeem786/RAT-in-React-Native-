@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mobile Monitoring Admin Panel</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔒 Mobile Monitoring Dashboard</h1>
+            <div class="status">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="connectionStatus">Disconnected</span>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-number" id="totalClients">0</div>
+                <div class="stat-label">Active Devices</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="totalContacts">0</div>
+                <div class="stat-label">Total Contacts</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="totalImages">0</div>
+                <div class="stat-label">Images Collected</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="activeStreams">0</div>
+                <div class="stat-label">Live Streams</div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="left-panel">
+                <div class="card">
+                    <div class="card-header">
+                        📱 Connected Devices
+                        <span id="clientCount">0</span>
+                    </div>
+                    <div class="card-content" id="clientsList">
+                        <div class="no-data">No devices connected</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        📞 Contacts
+                        <span id="contactsCount">0</span>
+                    </div>
+                    <div class="card-content" id="contactsList">
+                        <div class="no-data">No contacts available</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="right-panel">
+                <div class="card">
+                    <div class="card-header">
+                        📹 Live Video Stream
+                        <span id="streamStatus">No active stream</span>
+                    </div>
+                    <div class="card-content">
+                        <div class="video-container" id="videoContainer">
+                            <div class="no-video">📹 Select a device to start streaming</div>
+                            <canvas id="videoCanvas" style="display: none;"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        🖼️ Collected Images
+                        <span id="imagesCount">0</span>
+                    </div>
+                    <div class="card-content">
+                        <div class="images-grid" id="imagesList">
+                            <div class="no-data">No images available</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="admin.js"></script>
+</body>
+</html>

